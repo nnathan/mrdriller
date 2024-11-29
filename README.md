@@ -25,3 +25,11 @@ Mirror a subset of a website:
 ```
 ./mrdriller -include '^https://blog.cr.yp.to/?$' -include '2014.*html' -include '.*jpg' -exclude 'saber-fullsize' https://blog.cr.yp.to
 ```
+
+# Example 3
+
+Mirror a large ISO but allow resume/continue if partially on the filesystem:
+
+```
+./mrdriller -depth 5 -resume -refresh 'iso\.' -include '/slackware-iso/?$' -include '/slackware-13.1-iso/?$' -include slackware-13.1-install-d1 'https://mirror.rackspace.com/slackware/slackware-iso/'
+```

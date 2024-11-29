@@ -23,8 +23,90 @@ var (
 	ErrFailToParseHTML = errors.New("could not parse HTML")
 )
 
-func fetch(url string, dest string) ([]string, error) {
-	resp, err := client.Get(url)
+// fetch is a hairy multi-pronged function that:
+//
+//   - resumes a GET download from a url to a destination file (using range requests)
+//
+//   - starts a new GET download from a url to a destination file
+//
+//   - if content is html, scrapes for any href/img src links and returns them
+//
+//     On failure cases it tries its best to download the file (in particular if trying
+//     to resume), otherwise errors gracefully.
+//
+//     There are no retries.
+func fetch(url string, dest string, resume bool) ([]string, error) {
+	var f *os.File
+	var info os.FileInfo
+	var req *http.Request
+	var resp *http.Response
+	var size int64
+	var destDir string
+	var err error
+
+	if !resume {
+		goto dontresume
+	}
+
+	f, err = os.OpenFile(dest, os.O_RDWR, 0666)
+	// if we fail to open the file, try creating anew without resume
+	if err != nil {
+		goto dontresume
+	}
+
+	defer f.Close()
+
+	info, err = f.Stat()
+	if err != nil {
+		f.Close()
+		goto dontresume
+	}
+
+	size = info.Size()
+
+	_, err = f.Seek(size, io.SeekStart)
+	if err != nil {
+		f.Close()
+		goto dontresume
+	}
+
+	req, err = http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GET request: %w", err)
+	}
+
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-", size))
+
+	resp, err = client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to do range GET request: %w", err)
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		// If we get a 200 then it's not partial content,
+		// which means the server is not honouring the
+		// range request; reset the file for full download
+		_, err = f.Seek(0, io.SeekStart)
+		if err != nil {
+			return nil, fmt.Errorf("failed to do seek to start of file: %w", err)
+		}
+
+		err = f.Truncate(0)
+		if err != nil {
+			return nil, fmt.Errorf("failed to truncate file: %w", err)
+		}
+	} else if resp.StatusCode != http.StatusPartialContent {
+		f.Close()
+		goto dontresume
+	}
+
+	goto copyfile
+
+dontresume:
+
+	resp, err = client.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch URL: %w", err)
 	}
@@ -35,18 +117,20 @@ func fetch(url string, dest string) ([]string, error) {
 		return nil, fmt.Errorf("got bad http status %s", resp.Status)
 	}
 
-	destDir := filepath.Dir(dest)
+	destDir = filepath.Dir(dest)
 	err = os.MkdirAll(destDir, 0755)
 	if err != nil {
 		return nil, fmt.Errorf("could not create destination directory %s: %v", destDir, err)
 	}
 
-	f, err := os.Create(dest)
+	f, err = os.Create(dest)
 	if err != nil {
 		return nil, fmt.Errorf("could not create file %s: %v\n", dest, err)
 	}
 
 	defer f.Close()
+
+copyfile:
 
 	if _, err = io.Copy(f, resp.Body); err != nil {
 		return nil, fmt.Errorf("error doing io copy: %w", err)
@@ -57,7 +141,10 @@ func fetch(url string, dest string) ([]string, error) {
 		return nil, nil
 	}
 
-	f.Seek(0, io.SeekStart)
+	_, err = f.Seek(0, io.SeekStart)
+	if err != nil {
+		return nil, fmt.Errorf("could not reread file for parsing links: %w", err)
+	}
 
 	doc, err := goquery.NewDocumentFromReader(bufio.NewReader(f))
 	if err != nil {
@@ -125,11 +212,13 @@ func (l *listFlags) Set(value string) error {
 }
 
 func main() {
+	var resume bool
 	var depth uint
 	var includes listFlags
 	var excludes listFlags
 	var refresh listFlags
 
+	flag.BoolVar(&resume, "resume", false, "resume previously downloaded files")
 	flag.UintVar(&depth, "depth", math.MaxUint, "depth for recursion")
 	flag.Var(&includes, "include", `regex(es) of URLs limiting what to include when downloading, e.g. -include blog.cr.yp.to/(.*html|.*jpg)$ [default: ".*"]`)
 	flag.Var(&excludes, "exclude", "regex(es) of URLs of what not to include when downloading, e.g. -exclude blog.cr.yp.to/.*js$")
@@ -140,7 +229,7 @@ func main() {
 	args := flag.Args()
 
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "./mrdriller [-depth #] [-include regex1 -include regex2 ...] [-exclude regex1 -exclude regex2 ...] [-refresh regex1 -refresh regex2 ...] URL")
+		fmt.Fprintln(os.Stderr, "./mrdriller [-resume] [-depth #] [-include regex1 -include regex2 ...] [-exclude regex1 -exclude regex2 ...] [-refresh regex1 -refresh regex2 ...] URL")
 		os.Exit(1)
 	}
 
@@ -272,8 +361,11 @@ func main() {
 
 		var info os.FileInfo
 
+		shouldResume := resume
+
 		for _, re := range refreshRE {
 			if re.MatchString(i.url) {
+				shouldResume = false
 				goto fetch
 			}
 		}
@@ -281,7 +373,7 @@ func main() {
 		info, err = os.Stat(path)
 
 		if err == nil {
-			size := info.Size()
+			localSize := info.Size()
 
 			resp, err := client.Head(i.url)
 			if err != nil {
@@ -294,10 +386,11 @@ func main() {
 			lengthStr := resp.Header.Get("Content-Length")
 
 			if lengthStr != "" {
-				length, err := strconv.Atoi(lengthStr)
+				l, err := strconv.Atoi(lengthStr)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "warning, content-length string is not an integer (got %s), force downloading", lengthStr)
-				} else if int64(length) == size {
+					shouldResume = false
+				} else if int64(l) == localSize {
 					// file on filesystem same size as remote,
 					// then assume we've already fetched correctly
 					continue
@@ -306,7 +399,8 @@ func main() {
 		}
 
 	fetch:
-		hrefs, err := fetch(i.url, path)
+
+		hrefs, err := fetch(i.url, path, shouldResume)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning, couldn't process URL %s: %v\n", i.url, err)
 
