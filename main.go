@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,37 +14,54 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/PuerkitoBio/goquery"
 )
 
 var (
-	client             = http.Client{Timeout: 10 * time.Second}
+	client             = http.Client{}
 	ErrFailToParseHTML = errors.New("could not parse HTML")
 )
 
-func fetch(url string) ([]byte, []string, error) {
+func fetch(url string, dest string) ([]string, error) {
 	resp, err := client.Get(url)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to fetch URL: %w", err)
+		return nil, fmt.Errorf("failed to fetch URL: %w", err)
 	}
 
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("got bad http status %s", resp.Status)
+	}
+
+	destDir := filepath.Dir(dest)
+	err = os.MkdirAll(destDir, 0755)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read http body: %w", err)
+		return nil, fmt.Errorf("could not create destination directory %s: %v", destDir, err)
+	}
+
+	f, err := os.Create(dest)
+	if err != nil {
+		return nil, fmt.Errorf("could not create file %s: %v\n", dest, err)
+	}
+
+	defer f.Close()
+
+	if _, err = io.Copy(f, resp.Body); err != nil {
+		return nil, fmt.Errorf("error doing io copy: %w", err)
 	}
 
 	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
 	if !strings.HasPrefix(contentType, "text/html") {
-		return body, nil, nil
+		return nil, nil
 	}
 
-	doc, err := goquery.NewDocumentFromReader(strings.NewReader(string(body)))
+	f.Seek(0, io.SeekStart)
+
+	doc, err := goquery.NewDocumentFromReader(bufio.NewReader(f))
 	if err != nil {
-		return body, nil, fmt.Errorf("%w: %w", ErrFailToParseHTML, err)
+		return nil, fmt.Errorf("%w: %w", ErrFailToParseHTML, err)
 	}
 
 	urls := []string{}
@@ -60,7 +78,7 @@ func fetch(url string) ([]byte, []string, error) {
 		urls = append(urls, src)
 	})
 
-	return body, urls, nil
+	return urls, nil
 }
 
 func urlToPath(u string) (string, error) {
@@ -216,7 +234,6 @@ func main() {
 		// then we download the file, otherwise skip.
 
 		matched := false
-
 		for _, re := range excludeRE {
 			if re.MatchString(i.url) {
 				matched = true
@@ -229,6 +246,7 @@ func main() {
 			continue
 		}
 
+		matched = false
 		for _, re := range includeRE {
 			if re.MatchString(i.url) {
 				matched = true
@@ -288,13 +306,9 @@ func main() {
 		}
 
 	fetch:
-		b, hrefs, err := fetch(i.url)
+		hrefs, err := fetch(i.url, path)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning, couldn't process URL %s: %v\n", i.url, err)
-
-			if errors.Is(err, ErrFailToParseHTML) {
-				goto save
-			}
 
 			continue
 		}
@@ -346,24 +360,6 @@ func main() {
 				queue = append(queue, Item{link, i.depth + 1})
 			}
 		}
-
-	save:
-
-		writeDir := filepath.Dir(path)
-		err = os.MkdirAll(writeDir, 0755)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning, could not create directory tree %s: %v\n", writeDir, err)
-			continue
-		}
-
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning, could not save file %s: %v\n", path, err)
-			continue
-		}
-
-		f.Write(b)
-		f.Close()
 
 		seen[i.url] = struct{}{}
 		fmt.Fprintf(os.Stderr, "Got %s -> %s\n", i.url, path)
