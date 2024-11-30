@@ -220,9 +220,9 @@ func main() {
 
 	flag.BoolVar(&resume, "resume", false, "resume previously downloaded files")
 	flag.UintVar(&depth, "depth", math.MaxUint, "depth for recursion")
-	flag.Var(&includes, "include", `regex(es) of URLs limiting what to include when downloading, e.g. -include blog.cr.yp.to/(.*html|.*jpg)$ [default: ".*"]`)
-	flag.Var(&excludes, "exclude", "regex(es) of URLs of what not to include when downloading, e.g. -exclude blog.cr.yp.to/.*js$")
-	flag.Var(&refresh, "refresh", "regex(es) of URLs of what should always be redownloaded, e.g. -refresh blog.cr.yp.to/.*sha256sum$")
+	flag.Var(&includes, "include", `regex(es) of URLs limiting what to include when downloading, e.g. -include 'blog.cr.yp.to/(.*html|.*jpg)$' [default: ".*"]`)
+	flag.Var(&excludes, "exclude", "regex(es) of URLs of what not to include when downloading, e.g. -exclude 'blog.cr.yp.to/.*js$'")
+	flag.Var(&refresh, "refresh", "regex(es) of URLs of what should always be redownloaded, e.g. -refresh '\\.md5$'")
 
 	flag.Parse()
 
