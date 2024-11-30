@@ -26,7 +26,7 @@ Mirror a subset of a website:
 ./mrdriller -include '^https://blog.cr.yp.to/?$' -include '2014.*html' -include '.*jpg' -exclude 'saber-fullsize' https://blog.cr.yp.to
 ```
 
-# Example 3
+## Example 3
 
 Mirror a large ISO but allow resume/continue if partially on the filesystem:
 
